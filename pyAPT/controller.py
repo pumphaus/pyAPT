@@ -14,38 +14,12 @@ class OutOfRangeError(Exception):
     super(OutOfRangeError, self).__init__(val)
 
 class Controller(object):
-  def __init__(self, serial_number=None, label=None):
+  def __init__(self, connection = None, dest=0x50, label=None):
     super(Controller, self).__init__()
 
-    # this takes up to 2-3s:
-    dev = pylibftdi.Device(mode='b', device_id=serial_number)
-    dev.baudrate = 115200
+    self.connection = connection
 
-    def _checked_c(ret):
-      if not ret == 0:
-        raise Exception(dev.ftdi_fn.ftdi_get_error_string())
-
-    _checked_c(dev.ftdi_fn.ftdi_set_line_property(  8,   # number of bits
-                                                    1,   # number of stop bits
-                                                    0   # no parity
-                                                    ))
-    time.sleep(50.0/1000)
-
-    dev.flush(pylibftdi.FLUSH_BOTH)
-
-    time.sleep(50.0/1000)
-
-    # skipping reset part since it looks like pylibftdi does it already
-
-    # this is pulled from ftdi.h
-    SIO_RTS_CTS_HS = (0x1 << 8)
-    _checked_c(dev.ftdi_fn.ftdi_setflowctrl(SIO_RTS_CTS_HS))
-
-    _checked_c(dev.ftdi_fn.ftdi_setrts(1))
-
-    self.serial_number = serial_number
     self.label = label
-    self._device = dev
 
     # some conservative limits
     # velocity is in mm/s
@@ -69,73 +43,8 @@ class Controller(object):
     # whether or not sofware limit in position is applied
     self.soft_limits = True
 
-    # the message queue are messages that are sent asynchronously. For example
-    # if we performed a move, and are waiting for move completed message,
-    # any other message received in the mean time are place in the queue.
-    self.message_queue = []
-
-  def __enter__(self):
-    return self
-
-  def __exit__(self, type_, value, traceback):
-    self.close()
-
-  def __del__(self):
-    self.close()
-
-  def close(self):
-    if not self._device.closed:
-      print 'Closing connnection to controller',self.serial_number
-      self.stop(wait=False)
-      # XXX we might want a timeout here, or this will block forever
-      self._device.close()
-
-  def _send_message(self, m):
-    """
-    m should be an instance of Message, or has a pack() method which returns
-    bytes to be sent to the controller
-    """
-    self._device.write(m.pack())
-
-  def _read(self, length, block=True):
-    """
-    If block is True, then we will return only when have have length number of
-    bytes. Otherwise we will perform a read, then immediately return with
-    however many bytes we managed to read.
-
-    Note that if no data is available, then an empty byte string will be
-    returned.
-    """
-    data = bytes()
-    while len(data) < length:
-      diff = length - len(data)
-      data += self._device.read(diff)
-      if not block:
-        break
-
-      time.sleep(0.001)
-
-    return data
-
-  def _read_message(self):
-    data = self._read(message.MGMSG_HEADER_SIZE)
-    msg = Message.unpack(data, header_only=True)
-    if msg.hasdata:
-      data = self._read(msg.datalength)
-      msglist = list(msg)
-      msglist[-1] = data
-      return Message._make(msglist)
-    return msg
-
-  def _wait_message(self, expected_messageID):
-    found = False
-    while not found:
-      m = self._read_message()
-      found = m.messageID == expected_messageID
-      if found:
-        return m
-      else:
-        self.message_queue.append(m)
+    # this will be set in _send_message for every message
+    self.dest = dest
 
   def _position_in_range(self, absolute_pos_mm):
     """
@@ -161,18 +70,20 @@ class Controller(object):
 
     Position and velocity will be in mm and mm/s respectively.
     """
-    reqmsg = Message(message.MGMSG_MOT_REQ_DCSTATUSUPDATE, param1=channel)
-    self._send_message(reqmsg)
+    reqmsg = Message(message.MGMSG_MOT_REQ_DCSTATUSUPDATE, param1=channel,
+                     dest=self.dest)
+    self.connection._send_message(reqmsg)
 
-    getmsg = self._wait_message(message.MGMSG_MOT_GET_DCSTATUSUPDATE)
+    getmsg = self.connection._wait_message(message.MGMSG_MOT_GET_DCSTATUSUPDATE,
+                                           self.dest)
     return ControllerStatus(self, getmsg.datastring)
 
   def identify(self):
     """
     Flashes the controller's activity LED
     """
-    idmsg = Message(message.MGMSG_MOD_IDENTIFY)
-    self._send_message(idmsg)
+    idmsg = Message(message.MGMSG_MOD_IDENTIFY, dest=self.dest)
+    self.connection._send_message(idmsg)
 
   def reset_parameters(self):
     """
@@ -181,14 +92,16 @@ class Controller(object):
     IMPORTANT: only one class of controller appear to support this at the
     moment, that being the BPC30x series.
     """
-    resetmsg = Message(message.MGMSG_MOT_SET_PZSTAGEPARAMDEFAULTS)
-    self._send_message(resetmsg)
+    resetmsg = Message(message.MGMSG_MOT_SET_PZSTAGEPARAMDEFAULTS,
+                       dest=self.dest)
+    self.connection._send_message(resetmsg)
 
   def request_home_params(self):
-    reqmsg = Message(message.MGMSG_MOT_REQ_HOMEPARAMS)
-    self._send_message(reqmsg)
+    reqmsg = Message(message.MGMSG_MOT_REQ_HOMEPARAMS, dest=self.dest)
+    self.connection._send_message(reqmsg)
 
-    getmsg = self._wait_message(message.MGMSG_MOT_GET_HOMEPARAMS)
+    getmsg = self.connection._wait_message(message.MGMSG_MOT_GET_HOMEPARAMS,
+                                           self.dest)
     dstr = getmsg.datastring
 
     """
@@ -202,12 +115,14 @@ class Controller(object):
     return st.unpack('<HHHii', dstr)
 
   def suspend_end_of_move_messages(self):
-      suspendmsg = Message(message.MGMSG_MOT_SUSPEND_ENDOFMOVEMSGS)
-      self._send_message(suspendmsg)
+      suspendmsg = Message(message.MGMSG_MOT_SUSPEND_ENDOFMOVEMSGS,
+                           dest=self.dest)
+      self.connection._send_message(suspendmsg)
 
   def resume_end_of_move_messages(self):
-      resumemsg = Message(message.MGMSG_MOT_RESUME_ENDOFMOVEMSGS)
-      self._send_message(resumemsg)
+      resumemsg = Message(message.MGMSG_MOT_RESUME_ENDOFMOVEMSGS,
+                          dest=self.dest)
+      self.connection._send_message(resumemsg)
 
   def home(self, wait=True, velocity=None, offset=0):
     """
@@ -261,26 +176,30 @@ class Controller(object):
 
     newparams= st.pack( '<HHHii',*curparams)
 
-    homeparamsmsg = Message(message.MGMSG_MOT_SET_HOMEPARAMS, data=newparams)
-    self._send_message(homeparamsmsg)
+    homeparamsmsg = Message(message.MGMSG_MOT_SET_HOMEPARAMS, data=newparams,
+                            dest=self.dest)
+    self.connection._send_message(homeparamsmsg)
 
     if wait:
       self.resume_end_of_move_messages()
     else:
       self.suspend_end_of_move_messages()
 
-    homemsg = Message(message.MGMSG_MOT_MOVE_HOME)
-    self._send_message(homemsg)
+    homemsg = Message(message.MGMSG_MOT_MOVE_HOME, dest=self.dest)
+    self.connection._send_message(homemsg)
 
     if wait:
-      self._wait_message(message.MGMSG_MOT_MOVE_HOMED)
+      self.connection._wait_message(message.MGMSG_MOT_MOVE_HOMED,
+                                    self.dest)
       return self.status()
 
   def position(self, channel=1, raw=False):
-    reqmsg = Message(message.MGMSG_MOT_REQ_POSCOUNTER, param1=channel)
-    self._send_message(reqmsg)
+    reqmsg = Message(message.MGMSG_MOT_REQ_POSCOUNTER, param1=channel,
+                     dest=self.dest)
+    self.connection._send_message(reqmsg)
 
-    getmsg = self._wait_message(message.MGMSG_MOT_GET_POSCOUNTER)
+    getmsg = self.connection._wait_message(message.MGMSG_MOT_GET_POSCOUNTER,
+                                           self.dest)
     dstr = getmsg.datastring
 
     """
@@ -333,11 +252,11 @@ class Controller(object):
     else:
       self.suspend_end_of_move_messages()
 
-    movemsg = Message(message.MGMSG_MOT_MOVE_ABSOLUTE,data=params)
-    self._send_message(movemsg)
+    movemsg = Message(message.MGMSG_MOT_MOVE_ABSOLUTE,data=params, dest=self.dest)
+    self.connection._send_message(movemsg)
 
     if wait:
-      msg = self._wait_message(message.MGMSG_MOT_MOVE_COMPLETED)
+      msg = self.connection._wait_message(message.MGMSG_MOT_MOVE_COMPLETED, self.dest)
       sts = ControllerStatus(self, msg.datastring)
       # I find sometimes that after the move completed message there is still
       # some jittering. This aims to wait out the jittering so we are
@@ -410,8 +329,9 @@ class Controller(object):
     i: 4 bytes for max velocity
     """
     params = st.pack('<Hiii',channel,0,acc_apt, max_vel_apt)
-    setmsg = Message(message.MGMSG_MOT_SET_VELPARAMS, data=params)
-    self._send_message(setmsg)
+    setmsg = Message(message.MGMSG_MOT_SET_VELPARAMS, data=params,
+                     dest=self.dest)
+    self.connection._send_message(setmsg)
 
   def velocity_parameters(self, channel=1, raw=False):
     """
@@ -427,10 +347,12 @@ class Controller(object):
     Example:
       min_vel, acc, max_vel = con.velocity_parameters()
     """
-    reqmsg = Message(message.MGMSG_MOT_REQ_VELPARAMS, param1=channel)
-    self._send_message(reqmsg)
+    reqmsg = Message(message.MGMSG_MOT_REQ_VELPARAMS, param1=channel,
+                     dest=self.dest)
+    self.connection._send_message(reqmsg)
 
-    getmsg = self._wait_message(message.MGMSG_MOT_GET_VELPARAMS)
+    getmsg = self.connection._wait_message(message.MGMSG_MOT_GET_VELPARAMS,
+                                           self.dest)
 
     """
     <: small endian
@@ -462,10 +384,11 @@ class Controller(object):
       - number of channels
     """
 
-    reqmsg = Message(message.MGMSG_HW_REQ_INFO)
-    self._send_message(reqmsg)
+    reqmsg = Message(message.MGMSG_HW_REQ_INFO, dest=self.dest)
+    self.connection._send_message(reqmsg)
 
-    getmsg = self._wait_message(message.MGMSG_HW_GET_INFO)
+    getmsg = self.connection._wait_message(message.MGMSG_HW_GET_INFO,
+                                           self.dest)
     """
     <: small endian
     I:    4 bytes for serial number
@@ -511,10 +434,10 @@ class Controller(object):
     stopmsg = Message(message.MGMSG_MOT_MOVE_STOP,
                       param1=channel,
                       param2=int(immediate))
-    self._send_message(stopmsg)
+    self.connection._send_message(stopmsg)
 
     if wait:
-      self._wait_message(message.MGMSG_MOT_MOVE_STOPPED)
+      self.connection._wait_message(message.MGMSG_MOT_MOVE_STOPPED, self.dest)
       sts = self.status()
       while sts.velocity_apt:
         time.sleep(0.001)
@@ -533,8 +456,8 @@ class Controller(object):
       by the server to the controller at least once a second or the controller
       will stop responding after ~50 commands
     """
-    msg = Message(message.MGMSG_MOT_ACK_DCSTATUSUPDATE)
-    self._send_message(msg)
+    msg = Message(message.MGMSG_MOT_ACK_DCSTATUSUPDATE, dest=self.dest)
+    self.connection._send_message(msg)
 
   def __repr__(self):
     return 'Controller(serial=%s, device=%s)'%(self.serial_number, self._device)
