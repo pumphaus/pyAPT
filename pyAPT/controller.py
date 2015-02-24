@@ -5,8 +5,8 @@ import pylibftdi
 import time
 import struct as st
 
-from message import Message
-import message
+from .message import Message
+from . import message
 
 class OutOfRangeError(Exception):
   def __init__(self, requested, allowed):
@@ -405,9 +405,9 @@ class Controller(object):
 
     sn,model,hwtype,fwver,notes,_,hwver,modstate,numchan = info
 
-    fwverminor = ord(fwver[0])
-    fwverinterim = ord(fwver[1])
-    fwvermajor = ord(fwver[2])
+    fwverminor = fwver[0]
+    fwverinterim = fwver[1]
+    fwvermajor = fwver[2]
 
     fwver = '%d.%d.%d'%(fwvermajor,fwverinterim, fwverminor)
 
@@ -490,6 +490,7 @@ class ControllerStatus(object):
     Note that velocity in the docs is stated as a unsigned word, by in reality
     it looks like it is signed.
     """
+
     channel, pos_apt, vel_apt, _, statusbits = st.unpack( '<HihHI',
                                                           statusbytestring)
 

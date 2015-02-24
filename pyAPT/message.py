@@ -56,10 +56,7 @@ class Message(_Message):
     assert(type(messageID) == int)
     if data:
       assert(param1 == 0 and param2 == 0)
-      assert(type(data) in [list, tuple, str])
-
-      if type(data) == str:
-        data = [ord(c) for c in data]
+      assert(type(data) in [list, tuple, bytes])
 
       return super(Message, cls).__new__(Message,
                                           messageID,
@@ -93,7 +90,7 @@ class Message(_Message):
       %dB: %d bytes of data
       """
       datalen = len(self.data)
-      if type(self.data) == str:
+      if type(self.data) == bytes:
         datalist = list(self.data)
       else:
         datalist = self.data
@@ -120,7 +117,7 @@ class Message(_Message):
                       self.dest,
                       self.src)
     if verbose:
-      print bytes(self),'=',map(lambda x:hex(ord(x)), ret)
+      print(bytes(self),'=',[hex(ord(x)) for x in ret])
 
     return ret
 
@@ -133,10 +130,10 @@ class Message(_Message):
 
   @property
   def datastring(self):
-    if type(self.data) == str:
+    if type(self.data) == bytes:
       return self.data
     else:
-      return ''.join(chr(x) for x in self.data)
+      return bytes(self.data)
 
   @property
   def datalength(self):

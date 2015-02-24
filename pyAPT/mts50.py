@@ -1,4 +1,4 @@
-from controller import Controller
+from .controller import Controller
 
 class MTS50(Controller):
   """
